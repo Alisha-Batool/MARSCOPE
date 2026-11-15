@@ -1,5 +1,12 @@
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+} from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -32,16 +39,40 @@ import {
   type RouteAssessment,
 } from "./services/missionPlanner";
 import {
+  fetchTraversability,
   fetchApi,
+  fetchProvenance,
+  planTerrainRoute,
+  RoutePlanApiError,
   slopePreviewUrl,
+  terrainAssetUrl,
   type ApiHealth,
+  type ProjectedCoordinate,
+  type ProvenanceReport,
+  type RoutePlanResponse,
   type SlopeMetadata,
   type TerrainSummary,
+  type TraversabilitySummary,
 } from "./services/terrainApi";
+
+type RasterPoint = ProjectedCoordinate & {
+  row: number;
+  column: number;
+};
+
+type CalculatedRoute = {
+  response: RoutePlanResponse;
+  maxSlope: number;
+  slopePenalty: number;
+  start: RasterPoint;
+  destination: RasterPoint;
+};
 
 const mapLayers = [
   "Terrain overview · illustrative",
   "Slope risk · derived DEM",
+  "Terrain traversability · slope classes",
+  "Calculated route overlay",
   "DEMO — TARGET DATA NOT INTEGRATED",
 ] as const;
 
@@ -55,28 +86,64 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function projectedToRasterPixel(
+  coordinate: ProjectedCoordinate,
+  metadata: SlopeMetadata,
+) {
+  const { bounds, width, height } = metadata;
+  return {
+    x: ((coordinate.x - bounds.left) / (bounds.right - bounds.left)) * width,
+    y: ((bounds.top - coordinate.y) / (bounds.top - bounds.bottom)) * height,
+  };
+}
+
 function App() {
   const [apiStatus, setApiStatus] = useState<
     "checking" | "online" | "offline"
   >("checking");
+  const [routeApiAvailable, setRouteApiAvailable] = useState(false);
   const [dataStatus, setDataStatus] = useState("unknown");
   const [terrainSummary, setTerrainSummary] = useState<TerrainSummary | null>(
     null,
   );
+  const [provenanceReport, setProvenanceReport] =
+    useState<ProvenanceReport | null>(null);
+  const [provenanceLoading, setProvenanceLoading] = useState(true);
+  const [provenanceError, setProvenanceError] = useState("");
   const [slopeMetadata, setSlopeMetadata] = useState<SlopeMetadata | null>(
     null,
   );
+  const [traversability, setTraversability] =
+    useState<TraversabilitySummary | null>(null);
+  const [traversabilityLoading, setTraversabilityLoading] = useState(true);
+  const [traversabilityError, setTraversabilityError] = useState("");
   const [terrainLoading, setTerrainLoading] = useState(true);
   const [terrainError, setTerrainError] = useState("");
   const [slopePreviewLoaded, setSlopePreviewLoaded] = useState(false);
   const [slopePreviewError, setSlopePreviewError] = useState(false);
+  const [slopePreviewDimensions, setSlopePreviewDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const [traversabilityPreviewLoaded, setTraversabilityPreviewLoaded] =
+    useState(false);
+  const [traversabilityPreviewError, setTraversabilityPreviewError] =
+    useState(false);
+  const [traversabilityPreviewDimensions, setTraversabilityPreviewDimensions] =
+    useState<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
 
     async function loadTerrain() {
-      const [healthResult, summaryResult, slopeResult] = await Promise.allSettled([
+      const [
+        healthResult,
+        summaryResult,
+        slopeResult,
+        traversabilityResult,
+        provenanceResult,
+      ] = await Promise.allSettled([
         fetchApi<ApiHealth>("/api/health", controller.signal),
         fetchApi<TerrainSummary>(
           "/api/terrain/jezero/summary",
@@ -86,15 +153,21 @@ function App() {
           "/api/terrain/jezero/slope",
           controller.signal,
         ),
+        fetchTraversability(controller.signal),
+        fetchProvenance(controller.signal),
       ]);
       if (cancelled) return;
 
       if (healthResult.status === "fulfilled") {
         setApiStatus("online");
         setDataStatus(healthResult.value.data_status);
+        setRouteApiAvailable(
+          healthResult.value.route_planning_available === true,
+        );
       } else {
         setApiStatus("offline");
         setDataStatus("unknown");
+        setRouteApiAvailable(false);
       }
 
       const errors: string[] = [];
@@ -108,11 +181,25 @@ function App() {
       } else {
         errors.push(getErrorMessage(slopeResult.reason));
       }
+      if (traversabilityResult.status === "fulfilled") {
+        setTraversability(traversabilityResult.value);
+        setTraversabilityError("");
+      } else {
+        setTraversabilityError(getErrorMessage(traversabilityResult.reason));
+      }
+      if (provenanceResult.status === "fulfilled") {
+        setProvenanceReport(provenanceResult.value);
+        setProvenanceError("");
+      } else {
+        setProvenanceError(getErrorMessage(provenanceResult.reason));
+      }
       if (healthResult.status === "rejected") {
         errors.unshift(getErrorMessage(healthResult.reason));
       }
       setTerrainError(errors.join(" · "));
       setTerrainLoading(false);
+      setTraversabilityLoading(false);
+      setProvenanceLoading(false);
     }
 
     void loadTerrain();
@@ -126,6 +213,17 @@ function App() {
   const [maxDuration, setMaxDuration] = useState(6);
   const [minOxygen, setMinOxygen] = useState(20);
   const [maxSlope, setMaxSlope] = useState(18);
+  const [slopePenalty, setSlopePenalty] = useState(2);
+  const [startPoint, setStartPoint] = useState<RasterPoint | null>(null);
+  const [destinationPoint, setDestinationPoint] =
+    useState<RasterPoint | null>(null);
+  const [selectingRoutePoints, setSelectingRoutePoints] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState("");
+  const [calculatedRoute, setCalculatedRoute] =
+    useState<CalculatedRoute | null>(null);
+  const routeRequestId = useRef(0);
+  const routeAbortController = useRef<AbortController | null>(null);
   const [priorities, setPriorities] = useState<MissionPriorities>({
     science: 86,
     safety: 92,
@@ -148,6 +246,14 @@ function App() {
   );
   const [question, setQuestion] = useState("");
 
+  useEffect(
+    () => () => {
+      routeRequestId.current += 1;
+      routeAbortController.current?.abort();
+    },
+    [],
+  );
+
   const routeResults = useMemo<RouteAssessment[]>(() => {
     return assessRoutes(
       demoRouteCandidates,
@@ -164,10 +270,17 @@ function App() {
   const feasibleRoutes = routeResults.filter((route) => route.feasible);
   const bestRoute = feasibleRoutes[0] ?? null;
 
+  function invalidateRouteRequest() {
+    routeRequestId.current += 1;
+    routeAbortController.current?.abort();
+    routeAbortController.current = null;
+    setRouteLoading(false);
+  }
+
   function updateConstraints() {
     if (!bestRoute) {
       setBriefing(
-        "No route meets the current mission profile. Relax the safety or timing constraints and re-evaluate the traverse plan.",
+        "No route meets the current mission profile. Relax one or more active duration, oxygen, or slope limits and re-evaluate the illustrative scenarios.",
       );
       return;
     }
@@ -208,8 +321,43 @@ function App() {
   ];
 
   const isSlopeLayer = layer === mapLayers[1];
-  const isScienceLayer = layer === mapLayers[2];
+  const isTraversabilityLayer = layer === mapLayers[2];
+  const isCalculatedRouteLayer = layer === mapLayers[3];
+  const isScienceLayer = layer === mapLayers[4];
+  const isRasterLayer =
+    isSlopeLayer || isTraversabilityLayer || isCalculatedRouteLayer;
   const mapTransform = `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${zoom})`;
+  const rasterMapReady =
+    !!slopeMetadata &&
+    slopePreviewLoaded &&
+    slopePreviewDimensions?.width === slopeMetadata.width &&
+    slopePreviewDimensions.height === slopeMetadata.height;
+  const classificationMapReady =
+    !!slopeMetadata &&
+    !!traversability &&
+    traversabilityPreviewLoaded &&
+    traversabilityPreviewDimensions?.width === slopeMetadata.width &&
+    traversabilityPreviewDimensions.height === slopeMetadata.height &&
+    traversability.width === slopeMetadata.width &&
+    traversability.height === slopeMetadata.height;
+  const calculatedRouteStale =
+    calculatedRoute !== null &&
+    (calculatedRoute.maxSlope !== maxSlope ||
+      calculatedRoute.slopePenalty !== slopePenalty ||
+      calculatedRoute.start.row !== startPoint?.row ||
+      calculatedRoute.start.column !== startPoint?.column ||
+      calculatedRoute.destination.row !== destinationPoint?.row ||
+      calculatedRoute.destination.column !== destinationPoint?.column);
+  const calculatedRoutePixels = useMemo(() => {
+    if (!calculatedRoute || !slopeMetadata) return "";
+    return calculatedRoute.response.route_coordinates
+      .map((coordinate) => {
+        const pixel = projectedToRasterPixel(coordinate, slopeMetadata);
+        return `${pixel.x},${pixel.y}`;
+      })
+      .join(" ");
+  }, [calculatedRoute, slopeMetadata]);
+  const routeTerrainProfile = calculatedRoute?.response.terrain_profile ?? null;
 
   function updatePriority(key: keyof MissionPriorities, value: number) {
     setPriorities((current) => ({ ...current, [key]: value }));
@@ -221,6 +369,131 @@ function App() {
 
   function moveMap(x: number, y: number) {
     setMapOffset((current) => ({ x: current.x + x, y: current.y + y }));
+  }
+
+  function handleRasterMapClick(event: MouseEvent<SVGSVGElement>) {
+    if (!selectingRoutePoints || !slopeMetadata || !rasterMapReady) return;
+
+    const screenMatrix = event.currentTarget.getScreenCTM();
+    if (!screenMatrix) return;
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(
+      screenMatrix.inverse(),
+    );
+    if (
+      point.x < 0 ||
+      point.y < 0 ||
+      point.x >= slopeMetadata.width ||
+      point.y >= slopeMetadata.height
+    ) {
+      return;
+    }
+
+    const column = Math.floor(point.x);
+    const row = Math.floor(point.y);
+    const { bounds, width, height } = slopeMetadata;
+    const selectedPoint: RasterPoint = {
+      row,
+      column,
+      x: bounds.left + ((column + 0.5) / width) * (bounds.right - bounds.left),
+      y: bounds.top - ((row + 0.5) / height) * (bounds.top - bounds.bottom),
+    };
+
+    invalidateRouteRequest();
+    setCalculatedRoute(null);
+    setRouteError("");
+    if (!startPoint) {
+      setStartPoint(selectedPoint);
+      if (destinationPoint) setSelectingRoutePoints(false);
+    } else if (!destinationPoint) {
+      setDestinationPoint(selectedPoint);
+      setSelectingRoutePoints(false);
+    }
+  }
+
+  function beginRoutePointSelection() {
+    if (startPoint && destinationPoint) {
+      invalidateRouteRequest();
+      setStartPoint(null);
+      setDestinationPoint(null);
+      setCalculatedRoute(null);
+    }
+    setRouteError("");
+    setSelectingRoutePoints(true);
+    setLayer(mapLayers[1]);
+  }
+
+  async function calculateTerrainRoute() {
+    if (!startPoint || !destinationPoint) {
+      setRouteError("Select both a rover start and a science destination on the slope map.");
+      return;
+    }
+    if (!routeApiAvailable) {
+      setRouteError(
+        "A* route planning is unavailable on the connected backend. Restart the ARES backend and verify /api/health reports route_planning_available.",
+      );
+      return;
+    }
+
+    setRouteLoading(true);
+    setLayer(mapLayers[1]);
+    setSelectingRoutePoints(false);
+    setRouteError("");
+    routeAbortController.current?.abort();
+    const requestId = ++routeRequestId.current;
+    const controller = new AbortController();
+    routeAbortController.current = controller;
+    const requestedStart = startPoint;
+    const requestedDestination = destinationPoint;
+    const requestedMaxSlope = maxSlope;
+    const requestedSlopePenalty = slopePenalty;
+
+    try {
+      const response = await planTerrainRoute({
+        start: { x: requestedStart.x, y: requestedStart.y },
+        destination: {
+          x: requestedDestination.x,
+          y: requestedDestination.y,
+        },
+        max_slope_degrees: requestedMaxSlope,
+        slope_penalty: requestedSlopePenalty,
+      }, controller.signal);
+      if (requestId !== routeRequestId.current || controller.signal.aborted) {
+        return;
+      }
+      setCalculatedRoute({
+        response,
+        maxSlope: requestedMaxSlope,
+        slopePenalty: requestedSlopePenalty,
+        start: requestedStart,
+        destination: requestedDestination,
+      });
+    } catch (error) {
+      if (requestId !== routeRequestId.current || controller.signal.aborted) {
+        return;
+      }
+      if (error instanceof RoutePlanApiError) {
+        const prefix =
+          error.kind === "infeasible"
+            ? "ROUTE INFEASIBLE"
+            : error.kind === "unavailable"
+              ? "TERRAIN DATA UNAVAILABLE"
+              : error.kind === "network"
+                ? "API UNAVAILABLE"
+                  : error.kind === "timeout"
+                    ? "API TIMEOUT"
+                  : error.kind === "invalid-response"
+                    ? "INVALID API RESPONSE"
+                    : "ROUTE API ERROR";
+        setRouteError(`${prefix}: ${error.message}`);
+      } else {
+        setRouteError(`Route calculation failed: ${getErrorMessage(error)}`);
+      }
+    } finally {
+      if (requestId === routeRequestId.current) {
+        routeAbortController.current = null;
+        setRouteLoading(false);
+      }
+    }
   }
 
   return (
@@ -403,6 +676,7 @@ function App() {
                     onChange={(event) => {
                       const value = event.currentTarget.valueAsNumber;
                       if (Number.isFinite(value)) {
+                        invalidateRouteRequest();
                         setMaxSlope(Math.max(1, Math.min(40, value)));
                       }
                     }}
@@ -476,8 +750,9 @@ function App() {
                   className={layer === item ? "layer-tab active" : "layer-tab"}
                   onClick={() => {
                     setLayer(item);
-                    setSlopePreviewLoaded(false);
-                    setSlopePreviewError(false);
+                    if (item !== mapLayers[1]) {
+                      setSelectingRoutePoints(false);
+                    }
                   }}
                   aria-pressed={layer === item}
                 >
@@ -513,12 +788,12 @@ function App() {
           >
             <div className="map-viewport" style={{ transform: mapTransform }}>
             <div className="map-coordinate">
-              {isSlopeLayer ? (
+              {isRasterLayer ? (
                 <>
                   {slopeMetadata?.region.toUpperCase() ?? "JEZERO CRATER"}
                   <br />
                   {slopeMetadata
-                    ? `${slopeMetadata.width} × ${slopeMetadata.height} px · SLOPE IN DEGREES`
+                    ? `${slopeMetadata.width} × ${slopeMetadata.height} px · ${slopeMetadata.resolution.x} M/PIXEL`
                     : "LOADING SLOPE METADATA"}
                 </>
               ) : (
@@ -530,64 +805,212 @@ function App() {
               )}
             </div>
 
-            {isSlopeLayer && (
-              <div className="slope-layer">
-                <img
-                  className="slope-raster"
-                  src={slopePreviewUrl}
-                  alt="Jezero Crater terrain slope raster derived from the MOLA-HRSC blended DEM"
-                  onLoad={() => {
-                    setSlopePreviewLoaded(true);
-                    setSlopePreviewError(false);
-                  }}
-                  onError={() => {
-                    setSlopePreviewLoaded(false);
-                    setSlopePreviewError(true);
-                  }}
-                />
+            {isRasterLayer && (
+              <div
+                className={`slope-layer ${
+                  isTraversabilityLayer ? "classification-map-layer" : ""
+                }`}
+              >
+                {isTraversabilityLayer ? (
+                  traversability && (
+                    <img
+                      className="slope-raster"
+                      src={terrainAssetUrl(traversability.preview_url)}
+                      alt="Project-defined slope classes derived from the Jezero slope raster"
+                      onLoad={(event) => {
+                        setTraversabilityPreviewLoaded(true);
+                        setTraversabilityPreviewError(false);
+                        setTraversabilityPreviewDimensions({
+                          width: event.currentTarget.naturalWidth,
+                          height: event.currentTarget.naturalHeight,
+                        });
+                      }}
+                      onError={() => {
+                        setTraversabilityPreviewLoaded(false);
+                        setTraversabilityPreviewError(true);
+                        setTraversabilityPreviewDimensions(null);
+                      }}
+                    />
+                  )
+                ) : (
+                  <img
+                    className="slope-raster"
+                    src={slopePreviewUrl}
+                    alt="Jezero Crater terrain slope raster derived from the MOLA-HRSC blended DEM"
+                    onLoad={(event) => {
+                      setSlopePreviewLoaded(true);
+                      setSlopePreviewError(false);
+                      setSlopePreviewDimensions({
+                        width: event.currentTarget.naturalWidth,
+                        height: event.currentTarget.naturalHeight,
+                      });
+                    }}
+                    onError={() => {
+                      setSlopePreviewLoaded(false);
+                      setSlopePreviewError(true);
+                      setSlopePreviewDimensions(null);
+                    }}
+                  />
+                )}
+
+                {slopeMetadata &&
+                  (isTraversabilityLayer
+                    ? classificationMapReady
+                    : rasterMapReady) && (
+                  <svg
+                    className={`route-selection-overlay ${
+                      selectingRoutePoints && isSlopeLayer ? "selecting" : ""
+                    }`}
+                    viewBox={`0 0 ${slopeMetadata.width} ${slopeMetadata.height}`}
+                    preserveAspectRatio="xMidYMid meet"
+                    aria-label="Coordinate-aware Jezero raster with route overlay"
+                    onClick={handleRasterMapClick}
+                  >
+                    {calculatedRoute && calculatedRoutePixels && (
+                      <polyline
+                        className="calculated-route-line"
+                        points={calculatedRoutePixels}
+                      />
+                    )}
+                    {startPoint && (
+                      <g className="route-point-start">
+                        <circle
+                          cx={startPoint.column + 0.5}
+                          cy={startPoint.row + 0.5}
+                          r="14"
+                        />
+                        <text
+                          x={startPoint.column + 16}
+                          y={startPoint.row - 22}
+                        >
+                          START
+                        </text>
+                      </g>
+                    )}
+                    {destinationPoint && (
+                      <g className="route-point-destination">
+                        <circle
+                          cx={destinationPoint.column + 0.5}
+                          cy={destinationPoint.row + 0.5}
+                          r="14"
+                        />
+                        <text
+                          x={destinationPoint.column + 16}
+                          y={destinationPoint.row + 36}
+                        >
+                          DESTINATION
+                        </text>
+                      </g>
+                    )}
+                  </svg>
+                )}
 
                 <div className="slope-layer-label">
-                  {slopePreviewLoaded
-                    ? "TERRAIN SLOPE · DERIVED RASTER"
-                    : slopePreviewError
-                      ? "TERRAIN RASTER UNAVAILABLE"
-                      : "LOADING TERRAIN RASTER..."}
+                  {isTraversabilityLayer
+                    ? traversabilityPreviewLoaded
+                      ? "PROJECT-DEFINED TERRAIN CLASSES"
+                      : traversabilityPreviewError
+                        ? "CLASSIFIED TERRAIN PREVIEW UNAVAILABLE"
+                        : traversabilityLoading
+                          ? "LOADING CLASSIFICATION METADATA…"
+                          : traversabilityError
+                            ? "CLASSIFICATION DATA UNAVAILABLE"
+                            : "LOADING CLASSIFIED TERRAIN…"
+                    : slopePreviewLoaded
+                      ? selectingRoutePoints
+                        ? !startPoint
+                          ? "CLICK RASTER TO SELECT ROVER START"
+                          : "CLICK RASTER TO SELECT SCIENCE DESTINATION"
+                        : isCalculatedRouteLayer
+                          ? calculatedRoute
+                            ? "CALCULATED ROUTE OVERLAY · SLOPE BACKGROUND"
+                            : "CALCULATED ROUTE OVERLAY · NO ROUTE YET"
+                          : "TERRAIN SLOPE · DERIVED RASTER"
+                      : slopePreviewError
+                        ? "TERRAIN RASTER UNAVAILABLE"
+                        : "LOADING TERRAIN RASTER..."}
                 </div>
 
-                <div className="slope-legend">
-                  <strong>SLOPE · DEGREES</strong>
-                  <span>
-                    <i className="slope-swatch slope-low" /> 0–5°
-                  </span>
-                  <span>
-                    <i className="slope-swatch slope-moderate" /> 5–12°
-                  </span>
-                  <span>
-                    <i className="slope-swatch slope-high" /> 12–18°
-                  </span>
-                  <span>
-                    <i className="slope-swatch slope-critical" /> Above 18°
-                  </span>
-                </div>
-
-                {slopePreviewError && (
-                  <div className="slope-provisional">
-                    Unable to load raster. Check that FastAPI is running on port
-                    8000.
+                {isTraversabilityLayer && traversability && (
+                  <div className="slope-legend traversability-legend">
+                    <strong>PROJECT SLOPE CLASSES · DEGREES</strong>
+                    {traversability.category_definitions.map((category) => {
+                      const range =
+                        category.minimum_exclusive_degrees === null
+                          ? `0–${category.maximum_inclusive_degrees}°`
+                          : category.maximum_inclusive_degrees === null
+                            ? `>${category.minimum_exclusive_degrees}°`
+                            : `>${category.minimum_exclusive_degrees}–≤${category.maximum_inclusive_degrees}°`;
+                      return (
+                        <span key={category.code}>
+                          <i
+                            className="slope-swatch"
+                            style={{ backgroundColor: category.color }}
+                          />
+                          <span>
+                            {category.name} · {range}
+                            <small>
+                              {category.cell_count.toLocaleString()} cells ·{" "}
+                              {category.percentage_of_valid_cells.toFixed(1)}%
+                            </small>
+                          </span>
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
 
-                {!slopePreviewError && (
-                  <div className="slope-provisional">
-                    {terrainSummary?.vertical_units_verified
-                      ? "DERIVED SLOPE · SOURCE VERTICAL UNITS VERIFIED"
-                      : "PROVISIONAL · DEM VERTICAL UNITS NOT YET VERIFIED"}
+                {isSlopeLayer && (
+                  <div className="slope-legend">
+                    <strong>SLOPE · DEGREES</strong>
+                    <span>
+                      <i className="slope-swatch slope-low" /> 0–5°
+                    </span>
+                    <span>
+                      <i className="slope-swatch slope-moderate" /> 5–12°
+                    </span>
+                    <span>
+                      <i className="slope-swatch slope-high" /> 12–18°
+                    </span>
+                    <span>
+                      <i className="slope-swatch slope-critical" /> Above 18°
+                    </span>
                   </div>
                 )}
+
+                {isTraversabilityLayer &&
+                  (traversabilityLoading ||
+                    traversabilityError ||
+                    traversabilityPreviewError ||
+                    !classificationMapReady) && (
+                    <div className="slope-provisional classification-status">
+                      {traversabilityPreviewError
+                        ? "Classified preview failed to load; check the FastAPI traversability preview endpoint."
+                        : traversabilityError
+                          ? `Classification unavailable: ${traversabilityError}`
+                          : traversabilityLoading
+                            ? "Loading project-defined classification and raster metadata…"
+                            : "Classification preview dimensions do not match the slope raster; aligned overlay is disabled."}
+                    </div>
+                  )}
+
+                {!isTraversabilityLayer &&
+                  (slopePreviewError ? (
+                    <div className="slope-provisional">
+                      Unable to load raster. Check that FastAPI is running on
+                      port 8000.
+                    </div>
+                  ) : (
+                    <div className="slope-provisional">
+                      {terrainSummary?.vertical_units_verified
+                        ? "DERIVED SLOPE · SOURCE VERTICAL UNITS VERIFIED"
+                        : "PROVISIONAL · DEM VERTICAL UNITS NOT YET VERIFIED"}
+                    </div>
+                  ))}
               </div>
             )}
 
-            {!isSlopeLayer && (
+            {!isRasterLayer && (
               <>
                 <div className="north-arrow">
                   N<span>↑</span>
@@ -737,8 +1160,12 @@ function App() {
             )}
 
             <div className="map-disclaimer">
-              {isSlopeLayer
-                ? "PROVISIONAL DERIVED SLOPE · ROUTES CONCEPTUAL, NOT VALIDATED OR GEOREFERENCED"
+              {isRasterLayer
+                ? calculatedRoute
+                  ? `BACKEND A* · RASTER-CELL ROUTE · SLOPE-ONLY, NOT VALIDATED NAVIGATION${calculatedRouteStale ? " · SETTINGS CHANGED—RECALCULATE" : ""}`
+                  : isTraversabilityLayer
+                    ? "PROJECT-DEFINED SLOPE CLASSES · NOT NASA-CERTIFIED SAFETY THRESHOLDS"
+                    : "PROVISIONAL DERIVED SLOPE · ROUTE SCENARIOS CONCEPTUAL, NOT VALIDATED TRAVERSES"
                 : `CONCEPTUAL ROUTES · NOT VALIDATED ROVER TRAVERSES OR GEOREFERENCED NAVIGATION · ${layer.toUpperCase()}`}
             </div>
             </div>
@@ -807,16 +1234,312 @@ function App() {
               <i className="status-dot" /> {selected.name.toUpperCase()} SELECTED
             </span>
             <span>
-              DATA: {isSlopeLayer ? "DERIVED DEM RASTER" : "SIMULATED"}
+              DATA: {isRasterLayer ? "DERIVED JEZERO TERRAIN" : "SIMULATED"}
             </span>
-            <span>GRID: ILLUSTRATIVE MARS SCENARIO</span>
+            <span>
+              GRID: {isRasterLayer ? "200 M JEZERO RASTER" : "ILLUSTRATIVE MARS SCENARIO"}
+            </span>
             <span className="right-status">
-              <i className="status-dot" /> WHAT-IF READY
+              <i className={`status-dot ${routeApiAvailable ? "" : "offline"}`} />{" "}
+              {routeApiAvailable ? "ROUTE API READY" : "ROUTE API OFFLINE"}
             </span>
           </div>
         </section>
 
         <aside className="right-panel">
+          <section className="right-section route-planner-section">
+            <div className="section-label">
+              TERRAIN ROUTE PLANNER <span className="route-engine-tag">A* · REAL RASTER</span>
+            </div>
+            <p className="route-planner-note">
+              Select cell centers on the derived slope raster. Click once for
+              the rover start and again for the destination. The destination
+              is a user-selected coordinate; verified science-target data is
+              not integrated.
+            </p>
+
+            <button
+              className="route-select-button"
+              type="button"
+              aria-pressed={selectingRoutePoints}
+              disabled={
+                !slopeMetadata ||
+                slopePreviewError ||
+                (slopePreviewLoaded && !rasterMapReady) ||
+                routeLoading
+              }
+              onClick={() => {
+                if (selectingRoutePoints) {
+                  setSelectingRoutePoints(false);
+                } else {
+                  beginRoutePointSelection();
+                }
+              }}
+            >
+              <MapPin size={14} />
+              {selectingRoutePoints
+                ? "CANCEL MAP SELECTION"
+                : startPoint && destinationPoint
+                  ? "CHANGE BOTH LOCATIONS"
+                  : "SELECT LOCATIONS ON MAP"}
+            </button>
+
+            {!rasterMapReady && (
+              <p className="route-hint" role="status">
+                {apiStatus === "offline"
+                  ? "Terrain API is offline; connect FastAPI to load raster metadata and enable coordinate selection."
+                  : !slopeMetadata && !terrainLoading
+                    ? "Slope raster metadata is unavailable; check the backend data and API error above."
+                    : slopePreviewError
+                  ? "The slope preview is unavailable; map coordinates cannot be selected."
+                  : slopeMetadata &&
+                      slopePreviewLoaded &&
+                      slopePreviewDimensions
+                    ? "The preview dimensions do not match the terrain raster metadata. Coordinate selection is disabled."
+                    : "Loading terrain raster and coordinate metadata…"}
+              </p>
+            )}
+
+            <div className="route-point-list">
+              <div className="route-point-row">
+                <span className="route-point-dot start-dot" />
+                <div>
+                  <strong>ROVER START</strong>
+                  <small>
+                    {startPoint
+                      ? `${startPoint.x.toFixed(1)}, ${startPoint.y.toFixed(1)} m · cell ${startPoint.row}, ${startPoint.column}`
+                      : "Not selected"}
+                  </small>
+                </div>
+                {startPoint && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      invalidateRouteRequest();
+                      setStartPoint(null);
+                      setCalculatedRoute(null);
+                      setRouteError("");
+                      setSelectingRoutePoints(true);
+                      setLayer(mapLayers[1]);
+                    }}
+                    disabled={routeLoading}
+                  >
+                    CHANGE
+                  </button>
+                )}
+              </div>
+              <div className="route-point-row">
+                <span className="route-point-dot destination-dot" />
+                <div>
+                  <strong>SCIENCE DESTINATION</strong>
+                  <small>
+                    {destinationPoint
+                      ? `${destinationPoint.x.toFixed(1)}, ${destinationPoint.y.toFixed(1)} m · cell ${destinationPoint.row}, ${destinationPoint.column}`
+                      : "Not selected"}
+                  </small>
+                </div>
+                {destinationPoint && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      invalidateRouteRequest();
+                      setDestinationPoint(null);
+                      setCalculatedRoute(null);
+                      setRouteError("");
+                      setSelectingRoutePoints(true);
+                      setLayer(mapLayers[1]);
+                    }}
+                    disabled={routeLoading}
+                  >
+                    CHANGE
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <label className="slope-penalty-control">
+              <span>
+                SLOPE PENALTY <strong>{slopePenalty}</strong>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="10"
+                step="0.5"
+                value={slopePenalty}
+                onChange={(event) =>
+                  {
+                    invalidateRouteRequest();
+                    setSlopePenalty(Number(event.currentTarget.value));
+                  }
+                }
+                aria-label="Slope penalty for terrain route planning"
+              />
+              <small>Quadratic terrain cost weight; not an energy metric.</small>
+            </label>
+            <p className="route-hint">
+              Hard maximum slope limit: {maxSlope}° (Mission constraints).
+            </p>
+
+            <button
+              className="calculate-route-button"
+              type="button"
+              disabled={
+                !rasterMapReady ||
+                !routeApiAvailable ||
+                !startPoint ||
+                !destinationPoint ||
+                routeLoading
+              }
+              onClick={() => void calculateTerrainRoute()}
+            >
+              <Activity size={15} />
+              {routeLoading
+                ? "CALCULATING TERRAIN ROUTE…"
+                : calculatedRoute
+                  ? "RECALCULATE ROUTE"
+                  : "CALCULATE ROUTE"}
+            </button>
+
+            {!routeApiAvailable && apiStatus === "online" && (
+              <p className="route-hint" role="status">
+                The backend is reachable, but it does not advertise the A*
+                route-planning endpoint. Restart this project&apos;s FastAPI
+                backend.
+              </p>
+            )}
+
+            {routeError && (
+              <p className="route-error" role="alert">
+                {routeError}
+              </p>
+            )}
+            {calculatedRouteStale && (
+              <div className="route-stale" role="status">
+                Settings or selected locations changed. The displayed route
+                uses the previous settings.
+                <button
+                  type="button"
+                  disabled={routeLoading || !startPoint || !destinationPoint}
+                  onClick={() => void calculateTerrainRoute()}
+                >
+                  Recalculate
+                </button>
+              </div>
+            )}
+            {calculatedRoute && (
+              <div className="calculated-route-results" aria-live="polite">
+                <div className="calculated-route-heading">
+                  <strong>CALCULATED TERRAIN ROUTE</strong>
+                  <span>FEASIBLE</span>
+                </div>
+                <p>
+                  Generated by backend A* from the processed raster. Separate
+                  from the illustrative route scenarios below.
+                </p>
+                <div className="calculated-route-metrics">
+                  <div>
+                    <small>PATH DISTANCE</small>
+                    <strong>
+                      {calculatedRoute.response.path_distance_m >= 1000
+                        ? `${(calculatedRoute.response.path_distance_m / 1000).toFixed(2)} km`
+                        : `${calculatedRoute.response.path_distance_m.toFixed(1)} m`}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>ROUTE CELLS</small>
+                    <strong>
+                      {calculatedRoute.response.path_cell_count.toLocaleString()}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>MAX / AVG SLOPE</small>
+                    <strong>
+                      {calculatedRoute.response.maximum_encountered_slope_degrees.toFixed(2)}°
+                      {" / "}
+                      {calculatedRoute.response.average_encountered_slope_degrees.toFixed(2)}°
+                    </strong>
+                  </div>
+                  <div>
+                    <small>SLOPE-WEIGHTED MOVEMENT COST</small>
+                    <strong>
+                      {calculatedRoute.response.estimated_terrain_movement_cost.toFixed(1)} m-equivalent
+                    </strong>
+                  </div>
+                  <div>
+                    <small>COMPUTATION TIME</small>
+                    <strong>
+                      {calculatedRoute.response.computation_time_ms.toFixed(2)} ms
+                    </strong>
+                  </div>
+                </div>
+                <p className="route-science-note">
+                  {calculatedRoute.response.scientific_limitation}
+                </p>
+                {routeTerrainProfile && (
+                  <div className="route-terrain-profile">
+                    <strong>ROUTE SLOPE PROFILE</strong>
+                    <small>
+                      Measured source-raster slopes at calculated path cells;
+                      class thresholds are project-defined.
+                    </small>
+                    <div className="route-profile-categories">
+                      {routeTerrainProfile.categories.map((category) => (
+                        <div key={category.code}>
+                          <span>
+                            <i
+                              className="slope-swatch"
+                              style={{ backgroundColor: category.color }}
+                            />
+                            {category.name}
+                          </span>
+                          <strong>
+                            {category.cell_count} cells ·{" "}
+                            {category.percentage_of_route_cells.toFixed(1)}% ·{" "}
+                            {category.distance_m.toFixed(0)} m
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                    <p>
+                      Consecutive &gt;
+                      {routeTerrainProfile.thresholds.moderate_max_degrees}°
+                      segments:{" "}
+                      <strong>
+                        {routeTerrainProfile.high_slope_segment_count}
+                      </strong>
+                      {routeTerrainProfile.highest_slope_segment && (
+                        <>
+                          {" · "}highest segment peak{" "}
+                          <strong>
+                            {routeTerrainProfile.highest_slope_segment.maximum_slope_degrees.toFixed(2)}°
+                          </strong>
+                          {" · "}
+                          {routeTerrainProfile.highest_slope_segment.cell_count}{" "}
+                          cells · from{" "}
+                          {routeTerrainProfile.highest_slope_segment.start_coordinate
+                            .map((coordinate) => coordinate.toFixed(0))
+                            .join(", ")}{" "}
+                          m to{" "}
+                          {routeTerrainProfile.highest_slope_segment.end_coordinate
+                            .map((coordinate) => coordinate.toFixed(0))
+                            .join(", ")}{" "}
+                          m
+                        </>
+                      )}
+                    </p>
+                    <small>
+                      Category distance assigns each route edge to the more
+                      severe of its two endpoint classes. High-slope segments
+                      are contiguous route cells above{" "}
+                      {routeTerrainProfile.thresholds.moderate_max_degrees}°.
+                    </small>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
           <div className="right-section selected-strategy">
             <div className="section-label">SELECTED STRATEGY</div>
             <div className="route-title">{selected.name.toUpperCase()}</div>
@@ -935,6 +1658,117 @@ function App() {
               by USGS Astrogeology.
             </p>
 
+            <details className="methodology-panel">
+              <summary>
+                DATA &amp; METHODOLOGY
+                <span>
+                  {provenanceLoading
+                    ? "LOADING"
+                    : provenanceReport
+                      ? `${provenanceReport.product_verification.filter((product) => product.verification_status === "verified").length}/${provenanceReport.product_verification.length} PRODUCTS VERIFIED`
+                      : "MANIFEST UNAVAILABLE"}
+                </span>
+              </summary>
+              {provenanceLoading ? (
+                <p className="loading-state">Loading provenance manifest…</p>
+              ) : provenanceReport ? (
+                <div className="methodology-content">
+                  <p>
+                    <strong>Source DEM</strong>
+                    {provenanceReport.manifest.source_dataset.dataset_title}{" "}
+                    ({provenanceReport.manifest.source_dataset.version}), from{" "}
+                    {provenanceReport.manifest.source_dataset.provider}.
+                    Nominal source resolution:{" "}
+                    {provenanceReport.manifest.source_dataset.nominal_product_resolution.value}{" "}
+                    {provenanceReport.manifest.source_dataset.nominal_product_resolution.unit}.
+                    The blend combines NASA MOLA/Mars Global Surveyor and ESA
+                    HRSC/Mars Express; it is not exclusively NASA data.
+                  </p>
+                  <a
+                    href={provenanceReport.manifest.source_dataset.product_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    USGS authoritative product record
+                  </a>
+                  <p>
+                    <strong>Source versus derived</strong>
+                    {provenanceReport.manifest.source_dataset.original_asset.filename}{" "}
+                    is the source DEM. The Jezero slope raster, classification
+                    raster, summary, and image previews are derived products.
+                    The source copy was available outside the project checkout
+                    during provenance capture; it is not required for API
+                    startup.
+                  </p>
+                  <p>
+                    <strong>Slope</strong>
+                    Bilinear reprojection to a 200 m local Mars stereographic
+                    grid, then central-difference gradients:
+                    {" "}
+                    slope = atan(√((dz/dx)² + (dz/dy)²)). Vertical units are
+                    unverified; results are provisional.
+                  </p>
+                  <p>
+                    <strong>Project-defined classes</strong>
+                    0–5°, &gt;5–12°, &gt;12–18°, and &gt;18°; upper boundaries
+                    are inclusive. These are not NASA-certified safety
+                    thresholds.
+                  </p>
+                  <p>
+                    <strong>A* route and profile</strong>
+                    8-directional grid search, slope hard limit, and{" "}
+                    <code>
+                      distance × (1 + penalty × (mean slope / max slope)²)
+                    </code>
+                    . The straight-line heuristic is admissible. Movement cost
+                    is a slope-weighted metre-equivalent, not energy, travel
+                    time, or a validated mobility model. Profile values come
+                    from actual route cells; each edge distance is assigned to
+                    the more severe endpoint class.
+                  </p>
+                  <p className="methodology-status">
+                    ANALYSIS PROVISIONAL · SOURCE VERTICAL UNITS UNVERIFIED ·
+                    SLOPE ALONE DOES NOT ESTABLISH PHYSICAL TRAVERSABILITY.
+                  </p>
+                  <div className="methodology-products">
+                    <strong>PRODUCT INTEGRITY</strong>
+                    {provenanceReport.product_verification.map((product) => (
+                      <div key={product.record_id}>
+                        <span>{product.filename}</span>
+                        <b
+                          className={
+                            product.verification_status === "verified"
+                              ? "integrity-verified"
+                              : "integrity-warning"
+                          }
+                        >
+                          {product.verification_status.toUpperCase()}
+                        </b>
+                      </div>
+                    ))}
+                    <small>
+                      Original global DEM SHA-256 was not calculated because
+                      the local file is 11.38 GB. Product checksums and raster
+                      metadata are checked by the provenance endpoint, not
+                      during route planning.
+                    </small>
+                  </div>
+                  <p className="methodology-citation">
+                    {provenanceReport.manifest.source_dataset.recommended_citation}
+                  </p>
+                  <p className="methodology-citation">
+                    {provenanceReport.manifest.ai_assisted_development_disclosure}
+                  </p>
+                </div>
+              ) : (
+                <p className="empty-state" role="status">
+                  Provenance manifest unavailable.{" "}
+                  {provenanceError ||
+                    "Start the backend or restore backend/data/processed/provenance.json."}
+                </p>
+              )}
+            </details>
+
             {terrainLoading ? (
               <p className="loading-state">Loading Jezero terrain products…</p>
             ) : terrainSummary ? (
@@ -949,14 +1783,6 @@ function App() {
                     Mean {terrainSummary.mean_slope_degrees.toFixed(2)}° · P95{" "}
                     {terrainSummary.percentile_95_slope_degrees.toFixed(2)}° ·
                     max {terrainSummary.maximum_slope_degrees.toFixed(2)}°
-                  </span>
-                </p>
-                <p>
-                  <strong>Analysis</strong>
-                  <span>
-                    {terrainSummary.slope_method} ·{" "}
-                    {terrainSummary.source_resolution_m} m source grid ·{" "}
-                    {terrainSummary.valid_pixels.toLocaleString()} valid cells
                   </span>
                 </p>
                 <p>

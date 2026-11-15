@@ -1,0 +1,351 @@
+{
+  "schema_version": 1,
+  "manifest_id": "ares-jezero-terrain-provenance-v1",
+  "manifest_created_at": "2026-11-16T00:15:43+05:00",
+  "analysis_status": "provisional",
+  "source_dataset": {
+    "record_id": "usgs-mars-mgs-mola-mex-hrsc-blended-dem-global-200m-v2",
+    "dataset_title": "Mars MGS MOLA - MEX HRSC Blended DEM Global 200m",
+    "version": "v2",
+    "provider": "USGS Astrogeology Science Center",
+    "publisher": "USGS Astrogeology Science Center",
+    "originators_listed_by_provider": [
+      "DLR",
+      "NASA Goddard Space Flight Center"
+    ],
+    "instruments_and_missions": [
+      {
+        "instrument": "Mars Orbiter Laser Altimeter (MOLA)",
+        "mission": "NASA Mars Global Surveyor (MGS)"
+      },
+      {
+        "instrument": "High Resolution Stereo Camera (HRSC)",
+        "mission": "European Space Agency Mars Express (MEX)"
+      }
+    ],
+    "product_identifier": "unknown_not_listed_on_verified_product_record",
+    "product_url": "https://astrogeology.usgs.gov/search/map/mars_mgs_mola_mex_hrsc_blended_dem_global_200m",
+    "download_url": "https://planetarymaps.usgs.gov/mosaic/Mars/HRSC_MOLA_BlendDEM_Global_200mp_v2.tif",
+    "publication_date": "2018-01-31",
+    "recommended_citation": "Fergason, R. L., Hare, T. M., & Laura, J. (2018). HRSC and MOLA Blended Digital Elevation Model at 200m v2. Astrogeology PDS Annex, U.S. Geological Survey.",
+    "component_attribution": {
+      "MOLA": "CC0, as stated on the USGS product record",
+      "HRSC": "CC BY-SA 3.0 IGO, as stated on the USGS product record"
+    },
+    "nominal_product_resolution": {
+      "value": 200,
+      "unit": "metres per pixel",
+      "evidence": "USGS product record"
+    },
+    "original_asset": {
+      "filename": "Mars_HRSC_MOLA_BlendDEM_Global_200mp_v2.tif",
+      "availability_at_capture": "available_locally_outside_project_checkout",
+      "size_bytes": 11384463908,
+      "raster_metadata": {
+        "width": 106694,
+        "height": 53347,
+        "band_count": 1,
+        "data_types": [
+          "int16"
+        ],
+        "crs_wkt": "GEOGCS[\"GCS_Mars_2000_Sphere\",DATUM[\"Mars_2000_(Sphere)\",SPHEROID[\"Mars_2000_Sphere_IAU_IAG\",3396190,0]],PRIMEM[\"Reference_Meridian\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Latitude\",NORTH],AXIS[\"Longitude\",EAST]]",
+        "resolution_degrees_per_pixel": [
+          0.003374120830641,
+          0.003374120830641
+        ],
+        "nodata": -32768
+      },
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": null,
+        "status": "not_computed",
+        "reason": "The original source is 11,384,463,908 bytes. Its header metadata was inspected without reading or hashing the full source raster."
+      }
+    }
+  },
+  "processing_environment_observed_at_manifest_capture": {
+    "note": "Versions below were observed in the available project Python environment during provenance capture. Historical product-generation environments are not embedded in the existing slope raster.",
+    "python": "3.14.4",
+    "fastapi": "0.162.2",
+    "uvicorn": "0.54.0",
+    "pydantic": "2.14.3",
+    "rasterio": "1.5.2",
+    "gdal": "3.12.2",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "pillow": "13.0.0"
+  },
+  "processing_pipeline": [
+    {
+      "stage_id": "jezero-slope-derivation",
+      "input_product": "Original global blended DEM listed in source_dataset.original_asset",
+      "output_product": "jezero-slope-raster",
+      "operation": "Subset an approximate Jezero geographic bounding box, reproject to local Mars stereographic coordinates using bilinear resampling at 200 m pixel spacing, then derive slope with a central-difference gradient.",
+      "mathematical_method": "slope_degrees = degrees(atan(sqrt((dz/dx)^2 + (dz/dy)^2))); gradients use 200 m horizontal spacing.",
+      "parameters": {
+        "region_bounds_degrees_west_south_east_north": [
+          75.9,
+          16.9,
+          78.9,
+          19.9
+        ],
+        "target_projection": "+proj=stere +lat_0=18.4 +lon_0=77.4 +k=1 +x_0=0 +y_0=0 +R=3396190 +units=m +no_defs",
+        "target_resolution_m": 200,
+        "reprojection_resampling": "bilinear",
+        "gradient_method": "numpy.gradient central difference",
+        "nodata_edge_exclusion": "binary erosion of valid-data mask by one cell",
+        "vertical_units_verified": false
+      },
+      "units": {
+        "horizontal": "metres",
+        "slope": "degrees",
+        "elevation_source_units": "unknown_unverified"
+      },
+      "known_limitations": [
+        "The processing script does not independently verify the source DEM vertical unit before using elevation values in the gradient.",
+        "The source product record warns that some blended regions can contain interpolation or blending artifacts.",
+        "Slope from a 200 m/pixel raster is provisional and omits sub-pixel hazards."
+      ],
+      "processing_software": {
+        "script": "backend/geospatial/test_jezero_slope.py",
+        "historical_versions_embedded_in_product": false,
+        "observed_environment_reference": "processing_environment_observed_at_manifest_capture"
+      }
+    },
+    {
+      "stage_id": "jezero-slope-classification",
+      "input_product": "jezero-slope-raster",
+      "output_product": "jezero-traversability-default-raster",
+      "operation": "Classify each valid slope cell into four project-defined slope classes; preserve source grid alignment and mark NoData as code 0.",
+      "parameters": {
+        "low_maximum_degrees_inclusive": 5,
+        "moderate_maximum_degrees_inclusive": 12,
+        "high_maximum_degrees_inclusive": 18,
+        "boundary_rule": "Each class upper bound is inclusive; the next class lower bound is exclusive.",
+        "class_codes": {
+          "0": "NoData",
+          "1": "Low slope, 0 to 5 degrees inclusive",
+          "2": "Moderate slope, above 5 to 12 degrees inclusive",
+          "3": "High slope, above 12 to 18 degrees inclusive",
+          "4": "Above the default 18 degree constraint"
+        }
+      },
+      "units": {
+        "input": "degrees",
+        "output": "dimensionless class code"
+      },
+      "known_limitations": [
+        "Categories and thresholds are ARES project conventions, not NASA-certified rover-safety or traversability classes.",
+        "Slope class alone does not establish physical traversability."
+      ],
+      "processing_software": {
+        "module": "backend/terrain_classification.py",
+        "raster_write_strategy": "windowed GeoTIFF processing",
+        "historical_versions_embedded_in_product": false,
+        "observed_environment_reference": "processing_environment_observed_at_manifest_capture"
+      }
+    },
+    {
+      "stage_id": "jezero-slope-route-planning",
+      "input_product": "jezero-slope-raster",
+      "output_product": "route response generated per request; no route is stored as a fixed terrain product",
+      "operation": "8-directional A* over finite nonnegative slope cells. Cells above the request's maximum slope and NoData cells are blocked; diagonal movement requires both adjacent orthogonal cells to be traversable.",
+      "movement_cost_formula": "distance_m * (1 + slope_penalty * (mean_endpoint_slope_degrees / max_slope_degrees)^2)",
+      "heuristic": "Straight-line projected distance in metres; admissible because every edge cost is at least its geometric distance.",
+      "units": {
+        "coordinates": "local projected raster CRS units (metres)",
+        "distance": "metres",
+        "movement_cost": "slope-weighted metre-equivalent, not energy or duration"
+      },
+      "parameters": {
+        "maximum_slope_degrees": "per request, greater than 0 and at most 90",
+        "slope_penalty": "per request, 0 through 100",
+        "maximum_expanded_cells": 200000
+      },
+      "known_limitations": [
+        "The planner is a grid pathfinding demonstration, not autonomous rover navigation.",
+        "Slope is the only terrain cost and hard constraint; rover dynamics, rocks, wheel slip, soil and subsurface hazards are not modeled."
+      ],
+      "processing_software": {
+        "module": "backend/pathfinding.py"
+      }
+    },
+    {
+      "stage_id": "jezero-route-terrain-profile",
+      "input_product": "Calculated route cell sequence and jezero-slope-raster",
+      "output_product": "terrain_profile field in the route response",
+      "operation": "Summarize measured source-raster slope values at actual route cells into project-defined categories and calculate route-cell percentages and edge distances by category.",
+      "parameters": {
+        "default_thresholds_degrees": [
+          5,
+          12,
+          18
+        ],
+        "edge_distance_assignment": "Each route edge is assigned to the more severe category of its two endpoint cells.",
+        "high_slope_segment_definition": "A contiguous sequence of route cells above the moderate-class upper threshold."
+      },
+      "units": {
+        "slope": "degrees",
+        "distance": "metres",
+        "percentages": "percent of route cells"
+      },
+      "known_limitations": [
+        "Profile class membership is project-defined and does not imply safety or traversability.",
+        "Category edge distances use the documented endpoint attribution convention and are not separate measured surface distances."
+      ]
+    }
+  ],
+  "derived_products": [
+    {
+      "record_id": "jezero-slope-raster",
+      "filename": "jezero_slope_deg.tif",
+      "product_type": "derived_slope_raster",
+      "source_product": "Mars_HRSC_MOLA_BlendDEM_Global_200mp_v2.tif",
+      "processing_stage": "jezero-slope-derivation",
+      "generated_at": {
+        "value": "2026-11-08T18:46:45.793316+05:00",
+        "evidence": "filesystem modification timestamp; no generation timestamp is embedded in the existing raster"
+      },
+      "media_type": "image/tiff",
+      "raster_metadata": {
+        "width": 851,
+        "height": 891,
+        "band_count": 1,
+        "data_types": [
+          "float32"
+        ],
+        "crs_wkt": "PROJCS[\"unknown\",GEOGCS[\"unknown\",DATUM[\"unknown\",SPHEROID[\"unknown\",3396190,0]],PRIMEM[\"Reference meridian\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],PROJECTION[\"Stereographic\"],PARAMETER[\"latitude_of_origin\",18.4],PARAMETER[\"central_meridian\",77.4],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]",
+        "resolution_m": [
+          200,
+          200
+        ],
+        "transform": [
+          200,
+          0,
+          -85084.83086053838,
+          0,
+          -200,
+          89432.72857030314,
+          0,
+          0,
+          1
+        ],
+        "nodata": -9999
+      },
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": "ee175b76c434d16b74db4021623346f8551fc7eaef1fc7962d17d0823ce3776d"
+      }
+    },
+    {
+      "record_id": "jezero-slope-preview",
+      "filename": "jezero_slope_preview.png",
+      "product_type": "visualization_preview",
+      "source_product": "jezero_slope_deg.tif",
+      "processing_stage": "visualization-only; four rendered slope color bands",
+      "generated_at": {
+        "value": "2026-11-08T20:51:03.485635+05:00",
+        "evidence": "filesystem modification timestamp"
+      },
+      "media_type": "image/png",
+      "raster_metadata": {
+        "width": 851,
+        "height": 891,
+        "mode": "RGBA"
+      },
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": "6bca2d60472676d186f809659848bd9057bff110f6400b7db6f37d6a6f85f38d"
+      }
+    },
+    {
+      "record_id": "jezero-terrain-summary",
+      "filename": "jezero_terrain_summary.json",
+      "product_type": "derived_statistics",
+      "source_product": "jezero_slope_deg.tif",
+      "processing_stage": "summary output from backend/geospatial/test_jezero_slope.py",
+      "generated_at": {
+        "value": "2026-11-08T18:46:45.820314+05:00",
+        "evidence": "filesystem modification timestamp"
+      },
+      "media_type": "application/json",
+      "raster_metadata": null,
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": "125896cd24640acd6c85a977c26d061b6a045a3e09f21a955fe6d199a6857afa"
+      }
+    },
+    {
+      "record_id": "jezero-traversability-5-12-18-raster",
+      "filename": "jezero_traversability_5_12_18.tif",
+      "product_type": "derived_classification_raster",
+      "source_product": "jezero_slope_deg.tif",
+      "processing_stage": "jezero-slope-classification",
+      "generated_at": {
+        "value": "2026-11-16T00:24:56.526439+05:00",
+        "evidence": "filesystem modification timestamp; generated on demand by the API"
+      },
+      "media_type": "image/tiff",
+      "raster_metadata": {
+        "width": 851,
+        "height": 891,
+        "band_count": 1,
+        "data_types": [
+          "uint8"
+        ],
+        "crs_wkt": "PROJCS[\"unknown\",GEOGCS[\"unknown\",DATUM[\"unknown\",SPHEROID[\"unknown\",3396190,0]],PRIMEM[\"Reference meridian\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]]],PROJECTION[\"Stereographic\"],PARAMETER[\"latitude_of_origin\",18.4],PARAMETER[\"central_meridian\",77.4],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]]",
+        "resolution_m": [
+          200,
+          200
+        ],
+        "transform": [
+          200,
+          0,
+          -85084.83086053838,
+          0,
+          -200,
+          89432.72857030314,
+          0,
+          0,
+          1
+        ],
+        "nodata": 0
+      },
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": "197a0aa37a9f41b4138c249612070f3046cc727db027c7ed1e64d191b70b3a20"
+      }
+    },
+    {
+      "record_id": "jezero-traversability-5-12-18-preview",
+      "filename": "jezero_traversability_5_12_18_preview.png",
+      "product_type": "visualization_preview",
+      "source_product": "jezero_traversability_5_12_18.tif",
+      "processing_stage": "RGBA visualization of derived classification codes; not independent scientific measurements",
+      "generated_at": {
+        "value": "2026-11-16T00:03:26.981519+05:00",
+        "evidence": "filesystem modification timestamp"
+      },
+      "media_type": "image/png",
+      "raster_metadata": {
+        "width": 851,
+        "height": 891,
+        "mode": "RGBA"
+      },
+      "checksum": {
+        "algorithm": "SHA-256",
+        "sha256": "a2f05ffe1e1e89c7e1fd581fcc6e082db0319ac0e4fe9d176376aa70b06a871f"
+      }
+    }
+  ],
+  "scientific_limitations": [
+    "Elevation vertical units have not been independently verified; derived slopes are provisional.",
+    "The source is a NASA/ESA blended DEM distributed by USGS, not exclusively NASA data.",
+    "The listed USGS product landing page is not evidence that the DEM appears in any particular challenge resource list.",
+    "Slope-only categories are project-defined and not NASA-certified traversability or rover safety thresholds.",
+    "A* route distance and slope-weighted movement cost do not represent energy consumption, travel time, or a validated rover mobility model.",
+    "No rocks, wheel-slip probabilities, soil properties, subsurface hazards, rover dynamics, or autonomous navigation behaviors are modeled.",
+    "The global source DEM checksum was intentionally not computed because the file is 11,384,463,908 bytes."
+  ],
+  "ai_assisted_development_disclosure": "A Copilot-based AI assistant in VS Code assisted with software implementation, debugging, test authoring, quality checks, and technical documentation. At runtime, ARES does not call a generative-AI service. Illustrative scoring and the commander text response use deterministic local logic; terrain routes are calculated by the FastAPI backend from processed raster data. The repository does not establish whether visual assets were AI-generated; their origin must be confirmed by the project team before making an originality or AI-generation claim. Project authors remain responsible for reviewing the code, sources, and scientific claims. AI assistance does not imply NASA or USGS review, endorsement, validation, or challenge-rule compliance."
+}

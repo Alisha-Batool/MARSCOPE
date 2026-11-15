@@ -11,7 +11,23 @@ node_modules
 dist
 dist-ssr
 *.local
-backend/.venv/
+
+# Python environments and generated files
+**/.venv/
+**/.venv-*/
+**/venv/
+**/env/
+**/__pycache__/
+*.py[cod]
+
+# Local environment settings and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Do not add the original global source DEM to the repository
+**/Mars_HRSC_MOLA_BlendDEM_Global_200mp_v2.tif
 
 # Editor directories and files
 .vscode/*
