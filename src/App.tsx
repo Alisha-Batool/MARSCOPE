@@ -42,7 +42,7 @@ import {
 const mapLayers = [
   "Terrain overview · illustrative",
   "Slope risk · derived DEM",
-  "Science targets · demo",
+  "DEMO — TARGET DATA NOT INTEGRATED",
 ] as const;
 
 const routePaths: Record<string, string> = {
@@ -289,7 +289,9 @@ function App() {
           <Battery size={15} />
           <span>
             <small>ENERGY SCORE</small>
-            <strong>{Math.round(selected.energyScore)}/100 · PROXY</strong>
+            <strong>
+              {Math.round(selected.energyScore)}/100 · SIMULATED PROXY
+            </strong>
           </span>
         </div>
 
@@ -516,7 +518,7 @@ function App() {
                   {slopeMetadata?.region.toUpperCase() ?? "JEZERO CRATER"}
                   <br />
                   {slopeMetadata
-                    ? `${slopeMetadata.resolution.x} × ${Math.abs(slopeMetadata.resolution.y)} ${slopeMetadata.resolution.unit} · ${slopeMetadata.crs}`
+                    ? `${slopeMetadata.width} × ${slopeMetadata.height} px · SLOPE IN DEGREES`
                     : "LOADING SLOPE METADATA"}
                 </>
               ) : (
@@ -725,18 +727,19 @@ function App() {
 
             {isScienceLayer && (
               <div className="science-layer-notice">
-                <strong>SCIENCE TARGET DATA UNAVAILABLE</strong>
+                <strong>DEMO — TARGET DATA NOT INTEGRATED</strong>
                 <span>
-                  The backend has no science-target endpoint. Candidate science
-                  scores are illustrative planning inputs, not observations.
+                  The backend has no science-target endpoint. Target positions
+                  and science scores are illustrative only, not measured
+                  observations or NASA science-target data.
                 </span>
               </div>
             )}
 
             <div className="map-disclaimer">
               {isSlopeLayer
-                ? "DERIVED JEZERO SLOPE RASTER · PROVISIONAL ANALYSIS"
-                : `ILLUSTRATIVE ROUTE GEOMETRY · NOT A DEM MOSAIC · ${layer.toUpperCase()}`}
+                ? "PROVISIONAL DERIVED SLOPE · ROUTES CONCEPTUAL, NOT VALIDATED OR GEOREFERENCED"
+                : `CONCEPTUAL ROUTES · NOT VALIDATED ROVER TRAVERSES OR GEOREFERENCED NAVIGATION · ${layer.toUpperCase()}`}
             </div>
             </div>
 
@@ -846,14 +849,17 @@ function App() {
               Deterministic score {Math.round(selected.score)}/100 · science{" "}
               {Math.round(selected.scienceScore)} · safety{" "}
               {Math.round(selected.safetyScore)} · time{" "}
-              {Math.round(selected.timeScore)} · energy proxy{" "}
-              {Math.round(selected.energyScore)}. Energy proxy uses synthetic
-              distance, route slope and duration inputs.
+              {Math.round(selected.timeScore)} · simulated energy proxy{" "}
+              {Math.round(selected.energyScore)}. Time, oxygen and energy
+              metrics are illustrative scenario inputs; energy uses synthetic
+              distance, route slope and duration.
             </p>
           </div>
 
           <div className="right-section">
-            <div className="section-label">ROUTE RANKING · ILLUSTRATIVE</div>
+            <div className="section-label">
+              ROUTE RANKING · ILLUSTRATIVE · DURATION/O₂ SIMULATED
+            </div>
 
             {routeResults.length > 0 ? (
               <div className="route-list">
@@ -923,6 +929,12 @@ function App() {
               TERRAIN DATA &amp; PROVENANCE
             </div>
 
+            <p className="provenance-note">
+              MOLA–HRSC Blended DEM Global 200m v2 · 200 m/pixel · MOLA
+              (NASA Mars Global Surveyor) + HRSC (ESA Mars Express), distributed
+              by USGS Astrogeology.
+            </p>
+
             {terrainLoading ? (
               <p className="loading-state">Loading Jezero terrain products…</p>
             ) : terrainSummary ? (
@@ -951,18 +963,25 @@ function App() {
                   <strong>Raster</strong>
                   <span>
                     {slopeMetadata
-                      ? `${slopeMetadata.width} × ${slopeMetadata.height} · ${slopeMetadata.crs}`
+                      ? `${slopeMetadata.width} × ${slopeMetadata.height} pixels`
                       : "Metadata unavailable"}
                   </span>
                 </p>
-                <p className="provenance-caveat">
-                  {terrainSummary.analysis_status.toUpperCase()} · Vertical
-                  units{" "}
-                  {terrainSummary.vertical_units_verified
-                    ? "verified"
-                    : "not verified"}
-                  . Slope is derived from the blended DEM, not a direct NASA
-                  observation. Not scientifically validated for mission use.
+                <p>
+                  <strong>Source resolution</strong>
+                  <span>{terrainSummary.source_resolution_m} m/pixel</span>
+                </p>
+                <p>
+                  <strong>Slope method</strong>
+                  <span>{terrainSummary.slope_method}</span>
+                </p>
+                <p>
+                  <strong>Valid cells</strong>
+                  <span>{terrainSummary.valid_pixels.toLocaleString()}</span>
+                </p>
+                <p>
+                  <strong>Slope units</strong>
+                  <span>Degrees (°)</span>
                 </p>
               </div>
             ) : (
@@ -976,6 +995,42 @@ function App() {
                 API/data error: {terrainError}
               </p>
             )}
+            <p className="provenance-caveat">
+              {terrainSummary?.analysis_status.toUpperCase() ?? "PROVISIONAL"} ·
+              Vertical units remain unverified. The slope analysis is derived
+              from the DEM; route candidates and scores are synthetic
+              illustrative inputs, not DEM-derived or mission-validated.
+            </p>
+          </div>
+
+          <div className="right-section">
+            <div className="section-label">NASA RESOURCES</div>
+            <nav
+              className="resource-links"
+              aria-label="NASA and planetary data resources"
+            >
+              <a
+                href="https://trek.nasa.gov/mars/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                NASA JPL Mars Trek
+              </a>
+              <a
+                href="https://astrogeology-usgs.hub.arcgis.com/pages/interactive-maps-mars"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                USGS–NASA Interactive Mars Geologic Maps
+              </a>
+              <a
+                href="https://mars.nasa.gov/mars2020/multimedia/raw-images/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Perseverance Raw Images
+              </a>
+            </nav>
           </div>
 
           <div className="right-section">
