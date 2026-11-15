@@ -5,11 +5,6 @@ preliminary rover-route assessment around Jezero Crater on Mars. It combines
 processed MOLA–HRSC elevation data and a derived slope visualization with an
 interactive dashboard and deterministic route-scoring demonstration.
 
-> **Scope:** ARES is a decision-support prototype, not an autonomous rover
-> navigation system. The terrain slope product is derived from a real Mars
-> elevation dataset. Route candidates, their geometry, and their metrics are
-> illustrative scenarios, not measured traverses or georeferenced navigation
-> paths.
 
 ## Features
 
