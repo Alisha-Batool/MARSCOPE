@@ -1,0 +1,18 @@
+{
+    "region": "Jezero Crater",
+    "source": "USGS Mars MGS MOLA - MEX HRSC Blended DEM Global 200m v2",
+    "source_resolution_m": 200,
+    "analysis_status": "provisional",
+    "vertical_units_verified": false,
+    "slope_method": "central_difference",
+    "slope_threshold_degrees": 18.0,
+    "valid_pixels": 746639,
+    "minimum_slope_degrees": 0.0043013799004256725,
+    "maximum_slope_degrees": 41.33198165893555,
+    "mean_slope_degrees": 4.5700860023498535,
+    "median_slope_degrees": 3.4509530067443848,
+    "percentile_95_slope_degrees": 12.443829536437988,
+    "terrain_at_or_below_threshold_percent": 98.76955262181589,
+    "terrain_above_threshold_percent": 1.2304473781841097,
+    "slope_raster": "jezero_slope_deg.tif"
+}
